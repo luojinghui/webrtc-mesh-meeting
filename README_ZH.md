@@ -2,8 +2,6 @@
 
 Use Mesh architecture to build a multi-person meeting.
 
-[./README_ZH.md](中文)
-
 ## Dev
 
 Run server(signaling server by nodejs):
