@@ -1,24 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Button, Input, Form, message } from 'antd';
+import { MS, CONFIGURATION } from '../utils';
+import { io } from 'socket.io-client';
 import Stream from './stream';
 import Video from './video';
-import { io } from 'socket.io-client';
-
-const MS = {
-  login: 'LOGIN',
-  meeting: 'MEETING',
-};
-
-const DEFAULT_ICE_SERVER = {
-  url: 'turn:47.52.156.68:3478',
-  credential: 'zmecust',
-  username: 'zmecust',
-};
-
-const configuration = {
-  iceServers: [DEFAULT_ICE_SERVER],
-  sdpSemantics: 'unified-plan',
-};
 
 export const WebRTC = () => {
   // wss引用
@@ -29,21 +14,19 @@ export const WebRTC = () => {
     username: '',
     meetingId: 0,
   });
-  const userListRef = useRef([]);
+  const userListRef = useRef({});
   const localInfoRef = useRef({
     audio: true,
     video: true,
     username: '',
   });
+  const meetingStatusRef = useRef(MS.login);
+  const isInitLocalStream = useRef(false);
 
   // 当前用户信息
   const [layoutList, setLayoutList] = useState([]);
   // 当前呼叫状态,login/meeting
   const [meetingStatus, setMeetingStatus] = useState(MS.login);
-
-  useEffect(() => {
-    initWSS();
-  }, []);
 
   const initWSS = () => {
     // 连接信令服务器
@@ -60,56 +43,201 @@ export const WebRTC = () => {
 
           break;
         case 'users':
-          const userList = result.data.users;
-          const lastUser = userList[userList.length - 1];
-          const { username } = localInfoRef.current;
+          console.log('users message: ', result.data);
 
-          // 最后一位是当前用户，则当前用户入会成功
-          if (lastUser.username === username) {
-            console.log('当前用户加入会议');
-            try {
-              // 创建本地画面
-              await initLocalStream(username);
+          handleUsers(result.data);
+          break;
 
-              // 基于用户列表数据扩展一份数据，增加stream属性
-              updateUserList(userList);
+        case 'offer':
+          console.log('offer message: ', result.data);
 
-              // 基于用户列表数据，处理本地采集视频流、创建P2P通道
-              await createPeerConnections(userList);
+          await handleOffer(result.data);
+          break;
 
-              // 当前用户加入会议，向所有远端用户peer通道上添加local stream数据
-              addStreams();
+        case 'answer':
+          console.log('answer message: ', result.data);
 
-              // 当前用户加入会议，向所有远端用户发送offer数据，进行ice连接
-              sendOffers();
+          handleAnswer(result.data);
+          break;
 
-              // 创建LayoutList数据，用来渲染用户信息和画面
-              createLayout();
-            } catch (err) {
-              console.log('加入会议失败，无法采集视频流');
-            }
-          } else {
-            console.log('新用户加入会议');
-            // 否则，是远端新用户加入会议，创建Peer通道，等待P2P连接
-            createPeer(username);
-            const peer = peerMap.current[username];
+        case 'candidate':
+          console.log('candidate message: ', result.data);
 
-            addTrack(peer);
-          }
+          handleCandidate(result.data);
           break;
       }
     });
+
+    socket.current.on('connect', () => {
+      // 填写完用户名和房间号后，发送消息给信令
+      sendMessage({
+        type: 'start-call',
+        data: roomRef.current,
+      });
+    });
   };
 
-  const updateUserList = (userList) => {
-    const nextUserList = userList.map((user) => {
-      const { username } = user;
-      const stream = streamMap.current[username]?.stream || {};
+  useEffect(() => {
+    meetingStatusRef.current = meetingStatus;
+  }, [meetingStatus]);
 
-      return { ...user, stream };
+  /**
+   * 处理用户列表数据
+   *
+   * 变动来源：当前用户加入会议、远端有人出/入会
+   */
+  const handleUsers = async (data) => {
+    const userList = data.users;
+    const userLen = userList.length;
+    const lastUser = userList[userLen - 1];
+    const { username } = localInfoRef.current;
+
+    updateUserListRef(userList);
+
+    if (lastUser.username === username) {
+      // 非第一次加入会议
+      if (!isInitLocalStream.current) {
+        // 当前用户加入会议
+        await localJoinMeeting();
+      }
+    } else {
+      // 远端新用户加入会议
+      remoteJoinMeeting(lastUser.username);
+    }
+
+    // 创建LayoutList数据，用来渲染用户信息和画面
+    createLayout();
+    setMeetingStatus(userList.length > 0 ? MS.meeting : MS.login);
+  };
+
+  const updateUserListRef = (userList) => {
+    console.log('更新userList cache数据');
+
+    const userLen = userList.length;
+
+    for (let i = 0; i < userLen; i++) {
+      const item = userList[i];
+      const { username: currentUserName } = item;
+      const currentUser = userListRef.current[currentUserName];
+
+      if (!currentUser) {
+        userListRef.current[currentUserName] = {
+          ...item,
+          stream: null,
+          isDeal: true,
+        };
+      } else {
+        currentUser.isDeal = true;
+        userListRef.current[currentUserName] = currentUser;
+      }
+    }
+
+    for (let username in userListRef.current) {
+      const item = userListRef.current[username];
+
+      if (item && !item.isDeal) {
+        const { stream, streamInstance } = streamMap.current[username];
+
+        // 清理退会成员stream/peer资源
+        if (stream && streamInstance) {
+          streamInstance.destroyStream();
+        }
+
+        delete streamMap.current[username];
+        delete peerMap.current[username];
+        delete userListRef.current[username];
+      } else {
+        const stream = streamMap.current[username]?.stream || {};
+        userListRef.current[username] = { ...item, isDeal: false, stream };
+      }
+    }
+
+    console.log('userListRef.current: ', userListRef.current);
+  };
+
+  const remoteJoinMeeting = (username) => {
+    console.log('新用户加入会议');
+    const peer = peerMap.current[username];
+
+    if (!peer) {
+      // 否则，是远端新用户加入会议，创建Peer通道，等待P2P连接
+      createPeer(username);
+      addTrack(peerMap.current[username]);
+    }
+  };
+
+  const localJoinMeeting = async () => {
+    console.log('当前用户加入会议');
+
+    try {
+      // 创建本地画面
+      await initLocalStream();
+      // 基于用户列表数据，处理本地采集视频流、创建P2P通道
+      await createPeerConnections();
+      // 当前用户加入会议，向所有远端用户peer通道上添加local stream数据
+      addStreams();
+      // 当前用户加入会议，向所有远端用户发送offer数据，进行ice连接
+      sendOffers();
+
+      isInitLocalStream.current = true;
+    } catch (err) {
+      console.log('加入会议失败，无法采集视频流: ', err);
+    }
+  };
+
+  const handleCandidate = (msg) => {
+    const { candidate, callName } = msg;
+    const peer = peerMap.current[callName];
+
+    console.log('remote candidate: ', {
+      msg,
+      peer,
     });
 
-    userListRef.current = nextUserList;
+    peer.addIceCandidate(new RTCIceCandidate(candidate));
+  };
+
+  const handleAnswer = (msg) => {
+    const { answer, callName } = msg;
+    const peer = peerMap.current[callName];
+
+    console.log('remote answer: ', {
+      msg,
+      peer,
+    });
+
+    peer.setRemoteDescription(new RTCSessionDescription(answer));
+  };
+
+  const handleOffer = (msg) => {
+    const { offer, callName } = msg;
+    const peer = peerMap.current[callName];
+
+    console.log('handle offer peer: ', {
+      peer,
+      msg,
+    });
+
+    peer.setRemoteDescription(new RTCSessionDescription(offer));
+    // Create an answer to an offer
+    peer.createAnswer(
+      (answer) => {
+        console.log('created answer sdp: ', answer);
+
+        peer.setLocalDescription(answer);
+
+        sendMessage({
+          type: 'answer',
+          data: {
+            answer,
+            connectedName: callName,
+          },
+        });
+      },
+      (error) => {
+        console.log('creating an answer error: ', error);
+      }
+    );
   };
 
   // 呼叫会议状态
@@ -123,7 +251,43 @@ export const WebRTC = () => {
   };
 
   const sendOffers = () => {
-    
+    const userList = userListRef.current;
+    const { username } = roomRef.current;
+
+    for (let name in userList) {
+      if (name !== username) {
+        // 新增远端用户，需要初始化PeerConnection
+        console.log('is Remote, send offer...');
+
+        sendOffer(name);
+      }
+    }
+  };
+
+  const sendOffer = (name) => {
+    const peer = peerMap.current[name];
+
+    console.log('send offer: ', {
+      peer,
+      name,
+    });
+
+    const successCallback = (offer) => {
+      sendMessage({
+        type: 'offer',
+        data: {
+          offer: offer,
+          connectedName: name,
+        },
+      });
+      peer.setLocalDescription(offer);
+    };
+
+    const failureCallback = (err) => {
+      console.log('create offer error: ', err);
+    };
+
+    peer.createOffer(successCallback, failureCallback);
   };
 
   /**
@@ -133,7 +297,7 @@ export const WebRTC = () => {
     const { username } = localInfoRef.current;
     const localStream = streamMap.current[username].stream.mediaStream;
 
-    console.log('add tracks to peer');
+    console.log('add tracks to peer: ', peer);
 
     localStream
       .getTracks()
@@ -142,37 +306,65 @@ export const WebRTC = () => {
 
   const addStreams = () => {
     for (let peer in peerMap.current) {
-      addTrack(peer);
+      addTrack(peerMap.current[peer]);
     }
   };
 
-  const createPeerConnections = async (userList) => {
+  const createPeerConnections = async () => {
+    const userList = userListRef.current;
     const { username } = roomRef.current;
 
-    for (let i = 0; i < userList.length; i++) {
-      const { username: name } = userList[i];
+    for (let name in userList) {
+      const peer = peerMap.current[name];
 
       // 没有创建Peer通道
-      if (name !== username) {
+      if (name !== username && !peer) {
         // 新增远端用户，需要初始化PeerConnection
         console.log('is Remote, connection peer...');
 
-        createPeer(username);
+        createPeer(name);
       }
     }
   };
 
   const createPeer = (username) => {
     const peer = (peerMap.current[username] = new RTCPeerConnection(
-      configuration
+      CONFIGURATION
     ));
 
     peer.onicecandidate = (event) => {
       console.log('ice event: ', event);
+
+      if (event.candidate) {
+        sendMessage({
+          type: 'candidate',
+          data: {
+            candidate: event.candidate,
+            connectedName: username,
+          },
+        });
+      }
+    };
+
+    peer.onconnectionstatechange = (event) => {
+      console.log('peerConnection connect status: ', peer.connectionState);
+      console.log('conect peer: ', peer);
     };
 
     peer.ontrack = (event) => {
       console.log('track event: ', event);
+
+      const mediaStream = event.streams[0];
+      const streamInstance = new Stream();
+
+      streamInstance.setStream(mediaStream);
+
+      streamMap.current[username] = {
+        stream: streamInstance.getStream(),
+        streamInstance,
+      };
+
+      createLayout();
     };
 
     console.log('创建peer通道成功: ', {
@@ -181,7 +373,15 @@ export const WebRTC = () => {
     });
   };
 
-  const initLocalStream = async (username) => {
+  const initLocalStream = async () => {
+    const { username } = localInfoRef.current;
+    const localStream = streamMap.current[username];
+
+    if (localStream) {
+      return;
+    }
+    console.log('init local stream: ', username);
+
     const streamInstance = new Stream();
 
     // 采集音/视频流
@@ -201,17 +401,17 @@ export const WebRTC = () => {
   const createLayout = () => {
     const layouts = [];
 
-    userListRef.current.forEach((user) => {
-      const { username } = user;
+    for (let username in userListRef.current) {
+      const user = userListRef.current[username];
       const stream = streamMap.current[username]?.stream || {};
-      const nextUser = { ...user, stream };
+      const streamId = stream ? stream.id : 0;
+      const nextUser = { ...user, stream, id: `${username}_${streamId}` };
 
       layouts.push(nextUser);
-    });
+    }
 
     console.log('layouts: ', layouts);
     setLayoutList(layouts);
-    setMeetingStatus(layouts.length > 0 ? MS.meeting : MS.login);
   };
 
   // 加入房间
@@ -226,16 +426,47 @@ export const WebRTC = () => {
       username: values.username,
     };
 
-    // 填写完用户名和房间号后，发送消息给信令
-    sendMessage({
-      type: 'start-call',
-      data: values,
-    });
+    initWSS();
   };
 
   // 发送wss消息
-  const sendMessage = (data) => {
-    socket.current.send(JSON.stringify(data));
+  const sendMessage = (msg) => {
+    const { data } = msg;
+    const { meetingId, username } = roomRef.current;
+
+    // 扩展参数，携带meetingId信息
+    msg.data = {
+      ...data,
+      meetingId,
+      callName: username,
+    };
+
+    console.log('send message: ', msg);
+    socket.current.send(JSON.stringify(msg));
+  };
+
+  /**
+   * 挂断会议
+   */
+  const endCall = () => {
+    socket.current.disconnect();
+
+    for (let key in streamMap.current) {
+      const stream = streamMap.current[key];
+
+      console.log('close stream: ', streamMap.current[key]);
+
+      stream.streamInstance.destroyStream();
+    }
+
+    peerMap.current = {};
+    streamMap.current = {};
+    localInfoRef.current = {};
+    roomRef.current = {};
+    userListRef.current = {};
+    isInitLocalStream.current = false;
+    setMeetingStatus(MS.login);
+    setLayoutList([]);
   };
 
   const inRoom = meetingStatus === MS.meeting;
@@ -296,16 +527,18 @@ export const WebRTC = () => {
     }
 
     const layout = layoutList.map((val) => (
-      <span className="userTag" key={val.username}>
-        <Video item={val} />
-      </span>
+      <Video item={val} key={val.username} />
     ));
 
     return (
       <div className="layout">
-        <div className="users">{layout}</div>
+        <div className="users">
+          <div className="video-box">{layout}</div>
+        </div>
         <div className="operate">
-          <Button type="primary">挂断会议</Button>
+          <Button type="primary" onClick={endCall}>
+            挂断会议
+          </Button>
         </div>
       </div>
     );

@@ -16,6 +16,11 @@ class Stream {
     this.streamId = null;
   }
 
+  setStream(mediaStream) {
+    this.mediaStream = mediaStream;
+    this.streamId = mediaStream.id;
+  }
+
   /**
    * 获取本地Mediastream
    *
@@ -24,8 +29,18 @@ class Stream {
   getStream() {
     return {
       mediaStream: this.mediaStream,
-      id: this.mediaStream?.id,
+      id: this.streamId,
     };
+  }
+
+  destroyStream() {
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((track) => {
+        console.log('track destroy: ', track);
+
+        track.stop();
+      });
+    }
   }
 
   async initStream(config) {

@@ -14,6 +14,8 @@
 
 .operate {
   margin-top: 20px;
+  display: flex;
+  justify-content: center;
 }
 
 .center {
@@ -39,12 +41,21 @@
   margin-right: 15px;
 }
 
+.video-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .wrap-video {
   display: flex;
   flex-direction: column-reverse;
+  width: 300px;
+  margin: 10px;
 }
 
 .wrap-video video {
   width: 300px;
   height: 169px;
+  transform: rotateY(180deg);
 }

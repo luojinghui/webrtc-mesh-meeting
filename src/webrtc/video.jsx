@@ -1,20 +1,22 @@
 import React, { useEffect, useRef } from 'react';
 
 const Video = ({ item }) => {
-  const { displayName, video, audio, stream } = item;
+  const { username, stream, id } = item;
   const videoRef = useRef(null);
 
-  console.log('video item: ', item);
-
   useEffect(() => {
-    if (stream && stream.id) {
+    if (stream && stream.id && !videoRef.current.srcObject) {
       videoRef.current.srcObject = stream.mediaStream;
     }
-  }, [stream.id]);
+
+    return () => {
+      console.log('video destroy: ', username);
+    };
+  }, [id, stream, username]);
 
   return (
     <div className="wrap-video">
-      <span>{displayName}</span>
+      <span>{username}</span>
 
       <video ref={videoRef} autoPlay playsInline controls={false}></video>
     </div>
