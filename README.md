@@ -2,7 +2,7 @@
 
 Use Mesh architecture to build a multi-person meeting.
 
-[./README_ZH.md](中文)
+[中文](./README_ZH.md)
 
 ## Dev
 
