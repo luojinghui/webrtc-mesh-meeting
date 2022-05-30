@@ -1,7 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 
 const Video = ({ item }) => {
-  const { username, stream, id } = item;
+  const { username, stream, id, isLocal } = item;
+  console.log('item========: ', item);
   const videoRef = useRef(null);
 
   useEffect(() => {
@@ -14,11 +15,22 @@ const Video = ({ item }) => {
     };
   }, [id, stream, username]);
 
+  const localStyle = React.useMemo(() => {
+    return isLocal ? { transform: 'rotateY(180deg)' } : {};
+  }, [isLocal]);
+
   return (
     <div className="wrap-video">
       <span>{username}</span>
-
-      <video ref={videoRef} autoPlay playsInline controls={false}></video>
+      {!item.video && <div className="video video-status">视频暂停中</div>}
+      <video
+        style={localStyle}
+        ref={videoRef}
+        autoPlay
+        playsInline
+        controls={false}
+        className="video"
+      ></video>
     </div>
   );
 };

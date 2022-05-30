@@ -51,6 +51,12 @@ class Stream {
     const videoCons = video ? VIDEO_CONSTRAINTS : false;
     constraints.video = videoCons;
 
+    if (!constraints.video && !constraints.audio) {
+      this.mediaStream = null;
+      this.streamId = null;
+      return;
+    }
+
     try {
       this.mediaStream = await this.getUserMedia(constraints);
       this.streamId = this.mediaStream.id;

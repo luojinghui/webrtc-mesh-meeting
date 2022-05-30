@@ -138,7 +138,7 @@ const handleOffer = (message) => {
  * 建立会议
  */
 const startCall = (message, socket) => {
-  const { username, meetingId } = message.data;
+  const { username, meetingId, video, audio } = message.data;
   const roomInfo = roomList.get(meetingId);
 
   // 如果不存在这个房间信息，则创建房间
@@ -165,8 +165,8 @@ const startCall = (message, socket) => {
     // 设置房间新用户的信息
     nextRoomUserInfo[username] = {
       socket,
-      audio: true,
-      video: true,
+      audio,
+      video,
       username,
     };
     roomList.set(meetingId, nextRoomUserInfo);

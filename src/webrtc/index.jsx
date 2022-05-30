@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Button, Input, Form, message } from 'antd';
 import { MS, CONFIGURATION } from '../utils';
 import { io } from 'socket.io-client';
@@ -22,9 +22,13 @@ export const WebRTC = () => {
   });
   const meetingStatusRef = useRef(MS.login);
   const isInitLocalStream = useRef(false);
+  const msgRef = useRef([]);
+  const msgEleRef = useRef(null);
 
+  const [imForm] = Form.useForm();
   // 当前用户信息
   const [layoutList, setLayoutList] = useState([]);
+  const [msgList, setMsgList] = useState([]);
   // 当前呼叫状态,login/meeting
   const [meetingStatus, setMeetingStatus] = useState(MS.login);
 
@@ -81,6 +85,12 @@ export const WebRTC = () => {
     meetingStatusRef.current = meetingStatus;
   }, [meetingStatus]);
 
+  useEffect(() => {
+    if (msgEleRef.current) {
+      msgEleRef.current.scrollTop = msgEleRef.current.scrollHeight;
+    }
+  }, [msgList]);
+
   /**
    * 处理用户列表数据
    *
@@ -136,7 +146,7 @@ export const WebRTC = () => {
       const item = userListRef.current[username];
 
       if (item && !item.isDeal) {
-        const { stream, streamInstance } = streamMap.current[username];
+        const { stream, streamInstance } = streamMap.current[username] || {};
 
         // 清理退会成员stream/peer资源
         if (stream && streamInstance) {
@@ -157,7 +167,7 @@ export const WebRTC = () => {
 
   const remoteJoinMeeting = (username) => {
     console.log('新用户加入会议');
-    const peer = peerMap.current[username];
+    const { peer } = peerMap.current[username] || {};
 
     if (!peer) {
       // 否则，是远端新用户加入会议，创建Peer通道，等待P2P连接
@@ -187,40 +197,40 @@ export const WebRTC = () => {
 
   const handleCandidate = (msg) => {
     const { candidate, callName } = msg;
-    const peer = peerMap.current[callName];
+    const { peer } = peerMap.current[callName] || {};
 
     console.log('remote candidate: ', {
       msg,
       peer,
     });
 
-    peer.addIceCandidate(new RTCIceCandidate(candidate));
+    peer?.addIceCandidate(new RTCIceCandidate(candidate));
   };
 
   const handleAnswer = (msg) => {
     const { answer, callName } = msg;
-    const peer = peerMap.current[callName];
+    const { peer } = peerMap.current[callName] || {};
 
     console.log('remote answer: ', {
       msg,
       peer,
     });
 
-    peer.setRemoteDescription(new RTCSessionDescription(answer));
+    peer?.setRemoteDescription(new RTCSessionDescription(answer));
   };
 
   const handleOffer = (msg) => {
     const { offer, callName } = msg;
-    const peer = peerMap.current[callName];
+    const { peer } = peerMap.current[callName] || {};
 
     console.log('handle offer peer: ', {
       peer,
       msg,
     });
 
-    peer.setRemoteDescription(new RTCSessionDescription(offer));
+    peer?.setRemoteDescription(new RTCSessionDescription(offer));
     // Create an answer to an offer
-    peer.createAnswer(
+    peer?.createAnswer(
       (answer) => {
         console.log('created answer sdp: ', answer);
 
@@ -265,7 +275,7 @@ export const WebRTC = () => {
   };
 
   const sendOffer = (name) => {
-    const peer = peerMap.current[name];
+    const { peer } = peerMap.current[name] || {};
 
     console.log('send offer: ', {
       peer,
@@ -280,28 +290,30 @@ export const WebRTC = () => {
           connectedName: name,
         },
       });
-      peer.setLocalDescription(offer);
+      peer?.setLocalDescription(offer);
     };
 
     const failureCallback = (err) => {
       console.log('create offer error: ', err);
     };
 
-    peer.createOffer(successCallback, failureCallback);
+    peer?.createOffer(successCallback, failureCallback);
   };
 
   /**
    * 向peer通道添加stream track数据
    */
-  const addTrack = (peer) => {
+  const addTrack = (peerInstance) => {
     const { username } = localInfoRef.current;
     const localStream = streamMap.current[username].stream.mediaStream;
 
-    console.log('add tracks to peer: ', peer);
+    console.log('add tracks to peer: ', peerInstance);
 
-    localStream
-      .getTracks()
-      .forEach((track) => peer.addTrack(track, localStream));
+    if (localStream) {
+      localStream
+        .getTracks()
+        .forEach((track) => peerInstance.peer.addTrack(track, localStream));
+    }
   };
 
   const addStreams = () => {
@@ -315,7 +327,7 @@ export const WebRTC = () => {
     const { username } = roomRef.current;
 
     for (let name in userList) {
-      const peer = peerMap.current[name];
+      const { peer } = peerMap.current[name] || {};
 
       // 没有创建Peer通道
       if (name !== username && !peer) {
@@ -328,9 +340,18 @@ export const WebRTC = () => {
   };
 
   const createPeer = (username) => {
-    const peer = (peerMap.current[username] = new RTCPeerConnection(
-      CONFIGURATION
-    ));
+    const peer = new RTCPeerConnection(CONFIGURATION);
+    const channal = peer.createDataChannel('sendChannel');
+
+    peerMap.current[username] = { peer, channal };
+
+    channal.onopen = () => {
+      console.log('datachannel open');
+    };
+
+    channal.onclose = () => {
+      console.log('datachannel closed');
+    };
 
     peer.onicecandidate = (event) => {
       console.log('ice event: ', event);
@@ -367,14 +388,44 @@ export const WebRTC = () => {
       createLayout();
     };
 
+    createIMByDatachannel(peer);
+
     console.log('创建peer通道成功: ', {
       peer,
       username,
     });
   };
 
+  const onIMMessage = (event) => {
+    console.log('im message event: ', event);
+
+    const data = JSON.parse(event.data);
+
+    updateMsgList(data);
+  };
+
+  const updateMsgList = (data) => {
+    msgRef.current.push(data);
+
+    setMsgList(JSON.parse(JSON.stringify(msgRef.current)));
+  };
+
+  const createIMByDatachannel = (peer) => {
+    peer.ondatachannel = (event) => {
+      const receiveChannel = event.channel;
+
+      receiveChannel.onmessage = onIMMessage;
+      receiveChannel.onopen = (event) => {
+        console.log('im open event: ', event);
+      };
+      receiveChannel.onclose = (event) => {
+        console.log('im close event: ', event);
+      };
+    };
+  };
+
   const initLocalStream = async () => {
-    const { username } = localInfoRef.current;
+    const { username, video, audio } = localInfoRef.current;
     const localStream = streamMap.current[username];
 
     if (localStream) {
@@ -385,10 +436,7 @@ export const WebRTC = () => {
     const streamInstance = new Stream();
 
     // 采集音/视频流
-    await streamInstance.initStream({
-      video: true,
-      audio: false,
-    });
+    await streamInstance.initStream({ video, audio });
 
     streamMap.current[username] = {
       stream: streamInstance.getStream(),
@@ -400,12 +448,19 @@ export const WebRTC = () => {
 
   const createLayout = () => {
     const layouts = [];
+    const { username: localName } = localInfoRef.current;
 
     for (let username in userListRef.current) {
       const user = userListRef.current[username];
       const stream = streamMap.current[username]?.stream || {};
       const streamId = stream ? stream.id : 0;
-      const nextUser = { ...user, stream, id: `${username}_${streamId}` };
+      const isLocal = localName === username;
+      const nextUser = {
+        ...user,
+        stream,
+        id: `${username}_${streamId}`,
+        isLocal,
+      };
 
       layouts.push(nextUser);
     }
@@ -418,11 +473,18 @@ export const WebRTC = () => {
   const onCallMeeting = async (values) => {
     console.log('join room:', values);
 
+    const val = {
+      ...values,
+      video: true,
+      audio: false,
+    };
+
     // 缓存入会信息
-    roomRef.current = values;
+    roomRef.current = val;
     // 更新Local本地数据
     localInfoRef.current = {
       ...localInfoRef.current,
+      ...val,
       username: values.username,
     };
 
@@ -445,6 +507,29 @@ export const WebRTC = () => {
     socket.current.send(JSON.stringify(msg));
   };
 
+  const onSendMessage = (e) => {
+    console.log('finish e: ', e);
+
+    if (e.msg) {
+      const { username } = localInfoRef.current;
+      const msg = {
+        type: 'text',
+        msg: e.msg,
+        sender: username,
+        id: new Date().valueOf(),
+      };
+
+      for (let username in peerMap.current) {
+        const { channal } = peerMap.current[username];
+
+        updateMsgList(msg);
+        channal.send(JSON.stringify(msg));
+      }
+    }
+
+    imForm.resetFields();
+  };
+
   /**
    * 挂断会议
    */
@@ -462,11 +547,13 @@ export const WebRTC = () => {
     peerMap.current = {};
     streamMap.current = {};
     localInfoRef.current = {};
+    msgRef.current = [];
     roomRef.current = {};
     userListRef.current = {};
     isInitLocalStream.current = false;
     setMeetingStatus(MS.login);
     setLayoutList([]);
+    setMsgList([]);
   };
 
   const inRoom = meetingStatus === MS.meeting;
@@ -534,6 +621,38 @@ export const WebRTC = () => {
       <div className="layout">
         <div className="users">
           <div className="video-box">{layout}</div>
+          <div className="im-box">
+            <div className="message" ref={msgEleRef}>
+              <ul>
+                {msgList.map((item) => {
+                  const isSelf = localInfoRef.current.username === item.sender;
+
+                  return (
+                    <li
+                      key={item.id}
+                      className={isSelf ? 'msg reverse' : 'msg'}
+                    >
+                      <div className="name">{item.sender}</div>
+                      <div>{item.msg}</div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+            <div className="input">
+              <Form layout="inline" form={imForm} onFinish={onSendMessage}>
+                <Form.Item name="msg" className="im-input">
+                  <Input />
+                </Form.Item>
+
+                <Form.Item className="im-btn">
+                  <Button type="primary" htmlType="submit">
+                    发送
+                  </Button>
+                </Form.Item>
+              </Form>
+            </div>
+          </div>
         </div>
         <div className="operate">
           <Button type="primary" onClick={endCall}>
